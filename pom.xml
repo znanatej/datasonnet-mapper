@@ -6,7 +6,7 @@
 
     <groupId>com.datasonnet</groupId>
     <artifactId>datasonnet-mapper</artifactId>
-    <version>0.2.0-SNAPSHOT</version>
+    <version>0.2.0-MS3-SNAPSHOT</version>
 
     <licenses>
         <license>
@@ -355,14 +355,14 @@
 
     <distributionManagement>
         <repository>
-            <id>portx-repository-releases</id>
-            <name>PortX Releases Repository</name>
-            <url>https://portx.jfrog.io/portx/portx-releases</url>
+            <id>ms3-central</id>
+            <name>libs-release</name>
+            <url>http://maven.ms3-inc.com/artifactory/libs-release</url>
         </repository>
         <snapshotRepository>
-            <id>portx-repository-snapshots</id>
-            <name>PortX Snapshots Repository</name>
-            <url>https://portx.jfrog.io/portx/portx-snapshots</url>
+            <id>ms3-snapshots</id>
+            <name>libs-snapshot</name>
+            <url>http://maven.ms3-inc.com/artifactory/libs-snapshot</url>
         </snapshotRepository>
     </distributionManagement>
 
