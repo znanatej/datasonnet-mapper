@@ -1,18 +1,19 @@
 package com.datasonnet
 
 import java.net.URL
+import java.math.{BigDecimal, RoundingMode}
 import java.text.DecimalFormat
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.time.{Instant, Period, ZoneId, ZoneOffset}
-import java.util.{Base64, Scanner}
 import java.util.function.Function
+import java.util.{Base64, Scanner}
 
 import com.datasonnet
 import com.datasonnet.document.{DefaultDocument, MediaType}
 import com.datasonnet.spi.{DataFormatService, Library, ujsonUtils}
 import sjsonnet.Expr.Member.Visibility
-import sjsonnet.ReadWriter.StringRead
+import sjsonnet.ReadWriter.{ApplyerRead, ArrRead, StringRead}
 import sjsonnet.Std.{builtin, builtinWithDefaults, _}
 import sjsonnet.{Applyer, Error, EvalScope, Expr, FileScope, Materializer, Val}
 import ujson.Value
@@ -39,7 +40,7 @@ object DS extends Library {
         }
     },
 
-    builtin("entrySet", "obj") {
+    builtin("entriesOf", "obj") {
       (ev, fs, obj: Val.Obj) =>
         Val.Arr(obj.getVisibleKeys().keySet.collect({
           case key =>
@@ -205,7 +206,7 @@ object DS extends Library {
         }).mkString(sep)
     },
 
-    builtin("keySet", "obj") {
+    builtin("keysOf", "obj") {
       (_, _, obj: Val.Obj) =>
         Val.Arr(obj.getVisibleKeys().keySet.map(item => Val.Lazy(Val.Str(item))).toSeq)
     },
@@ -226,11 +227,11 @@ object DS extends Library {
         }
     },
 
-    builtin("mapEntrySet", "value", "funct") {
+    builtin("mapEntries", "value", "funct") {
       (ev, fs, value: Val, funct: Applyer) =>
         value match {
           case obj: Val.Obj =>
-            mapEntrySet(obj, funct, ev, fs)
+            mapEntries(obj, funct, ev, fs)
           case Val.Null => Val.Lazy(Val.Null).force
           case _ => throw new IllegalArgumentException(
             "Expected Object, got: " + value.prettyName);
@@ -510,7 +511,7 @@ object DS extends Library {
         Val.Lazy(Val.Str(sb.toString())).force
     },
 
-    builtin("valueSet", "obj") {
+    builtin("valuesOf", "obj") {
       (ev, fs, obj: Val.Obj) =>
         Val.Arr(obj.getVisibleKeys().keySet.map(key => Val.Lazy(obj.value(key, -1)(fs, ev))).toSeq)
     },
@@ -606,6 +607,121 @@ object DS extends Library {
 
     builtin("parseHex", "str"){ (ev, fs, str: String) =>
       Integer.parseInt(str, 16)
+    },
+
+    // migrated from util.libsonnet
+    builtin("parseDouble", "str"){ (ev, fs, str: String) =>
+      str.toDouble
+    },
+
+    builtin("combine", "first", "second") {
+      (ev, fs, first: Val, second: Val) =>
+        first match {
+          case Val.Str(str) =>
+            second match {
+              case Val.Str(str2) => Val.Lazy(Val.Str(str.concat(str2))).force
+              case Val.Num(num) =>
+                Val.Lazy(Val.Str(str.concat(
+                  if(Math.ceil(num) == Math.floor(num)){num.toInt.toString} else {num.toString}
+                ))).force
+              case i => throw new IllegalArgumentException(
+                "Expected String, Number, got: " + i.prettyName)
+            }
+          case Val.Num(num) =>
+            val stringNum = if(Math.ceil(num) == Math.floor(num)){num.toInt.toString} else {num.toString}
+            second match {
+              case Val.Str(str) => Val.Lazy(Val.Str(stringNum.concat(str))).force
+              case Val.Num(num2) =>
+                Val.Lazy(Val.Str(stringNum.concat(
+                  if(Math.ceil(num2) == Math.floor(num2)){num2.toInt.toString} else {num2.toString}
+                ))).force
+              case i => throw new IllegalArgumentException(
+                "Expected String, Number, got: " + i.prettyName)
+            }
+          case Val.Arr(arr) =>
+            second match {
+              case Val.Arr(arr2) => Val.Arr(arr.concat(arr2))
+              case i => throw new IllegalArgumentException(
+                "Expected Array, got: " + i.prettyName)
+            }
+          case obj: Val.Obj =>
+            val out = scala.collection.mutable.Map[String, Val.Obj.Member]()
+            second match {
+              case secObj: Val.Obj =>
+                out.addAll(obj.getVisibleKeys().map {
+                  case (sKey, _) => sKey -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => obj.value(sKey, -1)(fs, ev))
+                }).addAll(secObj.getVisibleKeys().map {
+                  case (sKey, _) => sKey -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => secObj.value(sKey, -1)(fs, ev))
+                })
+                new Val.Obj(out, _ => (), None)
+              case i => throw new IllegalArgumentException(
+                "Expected Object, got: " + i.prettyName)
+            }
+          case i => throw new IllegalArgumentException(
+            i.prettyName + " is not a valid type.")
+        }
+    },
+
+    builtin("remove", "collection", "value") {
+      (ev, fs, collection: Val, value: Val) =>
+        collection match {
+          case Val.Arr(arr) =>
+            Val.Arr(arr.collect({
+              case arrValue if arrValue.force != value => arrValue
+            }))
+          case obj: Val.Obj =>
+            value match {
+              case Val.Str(str) =>
+                new Val.Obj(scala.collection.mutable.Map(
+                  obj.getVisibleKeys().keySet.toSeq.collect({
+                    case key if key != str =>
+                      key -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => obj.value(key, -1)(fs, ev))
+                  }): _*), _ => (), None)
+              case i => throw new IllegalArgumentException(
+                "Expected String, got: " + i.prettyName)
+            }
+          case i => throw new IllegalArgumentException(
+            "Expected Array or Object, got: " + i.prettyName)
+        }
+    },
+
+    builtin("removeMatch", "first", "second") {
+      (ev, fs, first: Val, second: Val) =>
+        first match {
+          case Val.Arr(arr) =>
+            second match {
+              case Val.Arr(arr2) =>
+                //unfortunately cannot use diff here because of lazy values
+                Val.Arr(arr.filter(arrItem => !arr2.exists(arr2Item => arr2Item.force == arrItem.force)))
+              case i => throw new IllegalArgumentException(
+                "Expected Array, got: " + i.prettyName)
+            }
+          case obj: Val.Obj =>
+            second match {
+              case obj2: Val.Obj =>
+                new Val.Obj(scala.collection.mutable.Map(
+                  obj.getVisibleKeys().keySet.toSeq.collect({
+                    case key if !(obj2.containsKey(key) && obj.value(key, -1)(fs, ev) == obj2.value(key, -1)(fs, ev)) =>
+                      key -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => obj.value(key, -1)(fs, ev))
+                  }): _*), _ => (), None)
+              case i => throw new IllegalArgumentException(
+                "Expected Object, got: " + i.prettyName)
+            }
+          case i => throw new IllegalArgumentException(
+            "Expected Array or Object, got: " + i.prettyName)
+        }
+    },
+
+    builtin("append", "first", "second") {
+      (_, _, arr: Val.Arr, second: Val) =>
+        val out = collection.mutable.Buffer.empty[Val.Lazy]
+        Val.Arr(out.appendAll(arr.value).append(Val.Lazy(second)).toSeq)
+    },
+
+    builtin("prepend", "first", "second") {
+      (_, _, arr: Val.Arr, second: Val) =>
+        val out = collection.mutable.Buffer.empty[Val.Lazy]
+        Val.Arr(out.append(Val.Lazy(second)).appendAll(arr.value).toSeq)
     }
   )
 
@@ -855,9 +971,17 @@ object DS extends Library {
           (Random.nextInt((num - 0) + 1) + 0).intValue()
       },
 
-      builtin("round", "num") {
-        (_, _, num: Double) =>
+      builtinWithDefaults("round",
+        "num" -> None,
+      "precision" -> Some(Expr.Num(0, 0))){ (args, ev) =>
+        val num = args("num").cast[Val.Num].value
+        val prec = args("precision").cast[Val.Num].value.toInt
+
+        if (prec == 0) {
           Math.round(num).intValue()
+        } else {
+          BigDecimal.valueOf(num).setScale(prec, RoundingMode.HALF_UP).doubleValue()
+        }
       },
 
       builtin("sqrt", "num") {
@@ -990,24 +1114,114 @@ object DS extends Library {
         (_, _, array: Val.Arr, funct: Applyer) =>
           array.value.indexWhere(funct.apply(_) == Val.Lazy(Val.True).force)
       },
-      /* TODO: No builtin functions that allow 4 parameters
-      //TODO
-      builtin("join", "arr", "funct"){
-        (ev,fs, arr: Val.Arr, funct: Applyer) =>
-          //arr.value.
-          Val.Lazy(Val.Null).force
+
+      builtin0("join", "arrL", "arryR", "functL", "functR"){
+        (vals, ev,fs) =>
+          //map the input values
+          val valSeq = validate(vals, ev, fs, Array(ArrRead, ArrRead, ApplyerRead, ApplyerRead))
+          val arrL = valSeq(0).asInstanceOf[Val.Arr]
+          val arrR = valSeq(1).asInstanceOf[Val.Arr]
+          val functL = valSeq(2).asInstanceOf[Applyer]
+          val functR = valSeq(3).asInstanceOf[Applyer]
+
+          val out = collection.mutable.Buffer.empty[Val.Lazy]
+
+          arrL.value.foreach({
+            valueL => val compareL = functL.apply(valueL)
+              //append all that match the condition
+              out.appendAll(arrR.value.collect({
+                case valueR if compareL.equals(functR.apply(valueR)) =>
+                  val temp = scala.collection.mutable.Map[String, Val.Obj.Member]()
+                  temp += ("l" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => valueL.force))
+                  temp += ("r" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => valueR.force))
+                  Val.Lazy(new Val.Obj(temp, _ => (), None))
+              }))
+          })
+          Val.Arr(out.toSeq)
       },
-      //TODO
-      builtin("leftJoin", "arrayL", "arrayR", "funct"){
-        (ev,fs, arrayL: Val.Arr, arrayR: Val.Arr, funct: Applyer) =>
-          Val.Lazy(Val.Null).force
+
+      builtin0("leftJoin", "arrL", "arryR", "functL", "functR"){
+        (vals, ev,fs) =>
+          //map the input values
+          val valSeq = validate(vals, ev, fs, Array(ArrRead, ArrRead, ApplyerRead, ApplyerRead))
+          val arrL = valSeq(0).asInstanceOf[Val.Arr]
+          val arrR = valSeq(1).asInstanceOf[Val.Arr]
+          val functL = valSeq(2).asInstanceOf[Applyer]
+          val functR = valSeq(3).asInstanceOf[Applyer]
+
+          //make backup array for leftovers
+          var leftoversL = arrL.value
+
+          val out = collection.mutable.Buffer.empty[Val.Lazy]
+
+          arrL.value.foreach({
+            valueL => val compareL = functL.apply(valueL)
+              //append all that match the condition
+              out.appendAll(arrR.value.collect({
+                case valueR if compareL.equals(functR.apply(valueR)) =>
+                  val temp = scala.collection.mutable.Map[String, Val.Obj.Member]()
+                  //remove matching values from the leftOvers arrays
+                  leftoversL = leftoversL.filter(item => !item.force.equals(valueL.force))
+
+                  temp += ("l" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => valueL.force))
+                  temp += ("r" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => valueR.force))
+                  Val.Lazy(new Val.Obj(temp, _ => (), None))
+              }))
+          })
+
+          out.appendAll(leftoversL.map(
+            leftOver =>
+              Val.Lazy(new Val.Obj(
+                scala.collection.mutable.Map("l" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => leftOver.force)),
+                _ => (), None))
+          ))
+          Val.Arr(out.toSeq)
       },
-      //TODO
-      builtin("outerJoin", "arr", "funct"){
-        (ev,fs, arr: Val.Arr, funct: Applyer) =>
-          Val.Lazy(Val.Null).force
+
+      builtin0("outerJoin", "arrL", "arryR", "functL", "functR"){
+        (vals, ev,fs) =>
+          //map the input values
+          val valSeq = validate(vals, ev, fs, Array(ArrRead, ArrRead, ApplyerRead, ApplyerRead))
+          val arrL = valSeq(0).asInstanceOf[Val.Arr]
+          val arrR = valSeq(1).asInstanceOf[Val.Arr]
+          val functL = valSeq(2).asInstanceOf[Applyer]
+          val functR = valSeq(3).asInstanceOf[Applyer]
+
+          //make backup array for leftovers
+          var leftoversL = arrL.value
+          var leftoversR = arrR.value
+
+          val out = collection.mutable.Buffer.empty[Val.Lazy]
+
+          arrL.value.foreach({
+            valueL => val compareL = functL.apply(valueL)
+              //append all that match the condition
+              out.appendAll(arrR.value.collect({
+                case valueR if compareL.equals(functR.apply(valueR)) =>
+                  val temp = scala.collection.mutable.Map[String, Val.Obj.Member]()
+                  //remove matching values from the leftOvers arrays
+                  leftoversL = leftoversL.filter(item => !item.force.equals(valueL.force))
+                  leftoversR = leftoversR.filter(item => !item.force.equals(valueR.force))
+
+                  temp += ("l" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => valueL.force))
+                  temp += ("r" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => valueR.force))
+                  Val.Lazy(new Val.Obj(temp, _ => (), None))
+              }))
+          })
+
+          out.appendAll(leftoversL.map(
+            leftOver =>
+              Val.Lazy(new Val.Obj(
+                scala.collection.mutable.Map("l" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => leftOver.force)),
+                _ => (), None))
+            ).appendedAll(leftoversR.map(
+              leftOver =>
+                Val.Lazy(new Val.Obj(
+                  scala.collection.mutable.Map("r" -> Val.Obj.Member(add = false, Visibility.Normal, (_, _, _, _) => leftOver.force)),
+                  _ => (), None)))
+          ))
+          Val.Arr(out.toSeq)
       },
-       */
 
       builtin("partition", "arr", "funct") {
         (_, _, array: Val.Arr, funct: Applyer) =>
@@ -2163,7 +2377,7 @@ object DS extends Library {
     }
   }
 
-  private def mapEntrySet(obj: Val.Obj, funct: Applyer, ev: EvalScope, fs: FileScope): Val = {
+  private def mapEntries(obj: Val.Obj, funct: Applyer, ev: EvalScope, fs: FileScope): Val = {
     val args = funct.f.params.allIndices.size
     val out = collection.mutable.Buffer.empty[Val.Lazy]
     if (args.equals(3)) {
